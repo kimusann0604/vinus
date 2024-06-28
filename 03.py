@@ -120,3 +120,4 @@ if __name__ == "__main__":
             display_image(processed_image)
         else:
             print(f"Error: {result['message']}")
+#commit間違えました
