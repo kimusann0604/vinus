@@ -7,6 +7,7 @@ import pandas as pd
 import base64
 import streamlit.components.v1 as stc
 
+
 # Function to apply distortion
 def apply_distortion(im_cv, scale_x, scale_y, amount):
     (h, w, _) = im_cv.shape
@@ -103,3 +104,4 @@ elif page == "美容外科ランキング":
     stc.html('''
     <img src="/Users/kimurahotaka/Documents/Venus/takasu.jpg" alt="aiu"
             ''')
+    
