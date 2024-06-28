@@ -1,86 +1,122 @@
-import numpy as np
 import cv2
-import math
-import skimage.exposure
+import boto3
+import numpy as np
+import base64
+from botocore.config import Config
+from matplotlib import pyplot as plt
 
-img = cv2.imread("image.img")
+# AWSの設定
+# 注意: 環境変数やAWS IAMロールを使用することを強く推奨します
+aws_access_key_id = ''
+aws_secret_access_key = ''
+region_name = 'ap-northeast-1'
 
-# set location and radius
-cx = 130
-cy = 109
-radius = 30
+# Rekognitionクライアントの設定
+config = Config(retries={'max_attempts': 10, 'mode': 'standard'})
 
-# set distortion gain
-gain = 1.5
+def base64_to_cv2(image_base64):
+    image_bytes = base64.b64decode(image_base64)
+    np_array = np.frombuffer(image_bytes, np.uint8)
+    return cv2.imdecode(np_array, cv2.IMREAD_COLOR)
 
-# crop image 
-crop = img[cy-radius:cy+radius, cx-radius:cx+radius]
+def cv2_to_base64(image_cv2):
+    _, buffer = cv2.imencode('.jpg', image_cv2)
+    return base64.b64encode(buffer).decode()
 
-# get dimensions
-ht, wd = crop.shape[:2]
-xcent = wd / 2
-ycent = ht / 2
-rad = min(xcent,ycent)
+def rekog_eye(im):
+    client = boto3.client('rekognition', region_name, 
+                          aws_access_key_id=aws_access_key_id,
+                          aws_secret_access_key=aws_secret_access_key,
+                          config=config)
+    
+    _, buf = cv2.imencode('.jpg', im)
+    faces = client.detect_faces(Image={'Bytes':buf.tobytes()}, Attributes=['ALL'])
+    
+    landmarks = faces['FaceDetails'][0]['Landmarks']
+    eye_types = ['leftEyeLeft', 'leftEyeRight', 'leftEyeUp', 'leftEyeDown', 
+                 'rightEyeLeft', 'rightEyeRight', 'rightEyeUp', 'rightEyeDown']
+    
+    h, w, _ = im.shape
+    return {landmark['Type']: {'X': int(landmark['X'] * w), 'Y': int(landmark['Y'] * h)}
+            for landmark in landmarks if landmark['Type'] in eye_types}
 
-# set up the x and y maps as float32
-map_x = np.zeros((ht, wd), np.float32)
-map_y = np.zeros((ht, wd), np.float32)
-mask = np.zeros((ht, wd), np.uint8)
+def mosaic_area(src, x, y, width, height, blur_num):
+    dst = src.copy()
+    for _ in range(blur_num):
+        dst[y:y + height, x:x + width] = cv2.GaussianBlur(dst[y:y + height, x:x + width], (3,3), 3)
+    return dst
 
-# create map with the spherize distortion formula --- arcsin(r)
-# xcomp = arcsin(r)*x/r; ycomp = arsin(r)*y/r
-for y in range(ht):
-    Y = (y - ycent)/ycent
-    for x in range(wd):
-        X = (x - xcent)/xcent
-        R = math.hypot(X,Y)
-        if R == 0:
-            map_x[y, x] = x
-            map_y[y, x] = y
-            mask[y,x] = 255
-        elif R >= .90:    # avoid extreme blurring near R = 1
-            map_x[y, x] = x
-            map_y[y, x] = y
-            mask[y,x] = 0
-        elif gain >= 0:
-            map_x[y, x] = xcent*X*math.pow((2/math.pi)*(math.asin(R)/R), gain) + xcent
-            map_y[y, x] = ycent*Y*math.pow((2/math.pi)*(math.asin(R)/R), gain) + ycent
-            mask[y,x] = 255
-        elif gain < 0:
-            gain2 = -gain
-            map_x[y, x] = xcent*X*math.pow((math.sin(math.pi*R/2)/R), gain2) + xcent
-            map_y[y, x] = ycent*Y*math.pow((math.sin(math.pi*R/2)/R), gain2) + ycent
-            mask[y,x] = 255
+def process_image(im, magnification, blur_num):
+    EyePoints = rekog_eye(im)
+    bityouseix, bityouseiy = 20, 5
 
-# remap using map_x and map_y
-bump = cv2.remap(crop, map_x, map_y, cv2.INTER_LINEAR, borderMode = cv2.BORDER_CONSTANT, borderValue=(0,0,0))
+    leftTop = min(EyePoints[key]['Y'] for key in ['leftEyeUp', 'leftEyeDown', 'leftEyeRight', 'leftEyeLeft'])
+    leftBottom = max(EyePoints[key]['Y'] for key in ['leftEyeUp', 'leftEyeDown', 'leftEyeRight', 'leftEyeLeft'])
+    leftRight = max(EyePoints[key]['X'] for key in ['leftEyeUp', 'leftEyeDown', 'leftEyeRight', 'leftEyeLeft'])
+    leftLeft = min(EyePoints[key]['X'] for key in ['leftEyeUp', 'leftEyeDown', 'leftEyeRight', 'leftEyeLeft'])
+    
+    rightTop = min(EyePoints[key]['Y'] for key in ['rightEyeUp', 'rightEyeDown', 'rightEyeRight', 'rightEyeLeft'])
+    rightBottom = max(EyePoints[key]['Y'] for key in ['rightEyeUp', 'rightEyeDown', 'rightEyeRight', 'rightEyeLeft'])
+    rightRight = max(EyePoints[key]['X'] for key in ['rightEyeUp', 'rightEyeDown', 'rightEyeRight', 'rightEyeLeft'])
+    rightLeft = min(EyePoints[key]['X'] for key in ['rightEyeUp', 'rightEyeDown', 'rightEyeRight', 'rightEyeLeft'])
 
-# antialias edge of mask
-# (pad so blur does not extend to edges of image, then crop later)
-blur = 7
-mask = cv2.copyMakeBorder(mask, blur,blur,blur,blur, borderType=cv2.BORDER_CONSTANT, value=(0))
-mask = cv2.GaussianBlur(mask, (0,0), sigmaX=blur, sigmaY=blur, borderType = cv2.BORDER_DEFAULT)
-h, w = mask.shape
-mask = mask[blur:h-blur, blur:w-blur]
-mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-mask = skimage.exposure.rescale_intensity(mask, in_range=(127.5,255), out_range=(0,1))
+    leftEye = im[leftTop:leftBottom+bityouseiy, leftLeft-bityouseix:leftRight+bityouseix]
+    leftEye = cv2.resize(leftEye, (leftEye.shape[1], int(leftEye.shape[0]*magnification)))
+    rightEye = im[rightTop:rightBottom+bityouseiy, rightLeft-bityouseix:rightRight+bityouseix]
+    rightEye = cv2.resize(rightEye, (rightEye.shape[1], int(rightEye.shape[0]*magnification)))
 
-# merge bump with crop using grayscale (not binary) mask
-bumped = (bump * mask + crop * (1-mask)).clip(0,255).astype(np.uint8)
+    im[leftTop:leftTop+leftEye.shape[0], leftLeft-bityouseix:leftLeft+leftEye.shape[1]-bityouseix] = leftEye
+    im[rightTop:rightTop+rightEye.shape[0], rightLeft-bityouseix:rightLeft+rightEye.shape[1]-bityouseix] = rightEye
 
-# insert bumped image into original
-result = img.copy()
-result[cy-radius:cy+radius, cx-radius:cx+radius] = bumped
+    # Apply blurring
+    blur_areas = [
+        (leftLeft-bityouseix-int(bityouseix/2), leftTop, bityouseix, leftEye.shape[0]+bityouseiy),
+        (leftRight+int(bityouseix/2), leftTop, bityouseix, leftEye.shape[0]+bityouseiy),
+        (leftLeft-bityouseix, leftTop+leftEye.shape[0]-int(bityouseiy/2), leftEye.shape[1], bityouseiy),
+        (rightLeft-bityouseix-int(bityouseix/2), rightTop, bityouseix, rightEye.shape[0]+bityouseiy),
+        (rightRight+int(bityouseix/2), rightTop, bityouseix, rightEye.shape[0]+bityouseiy),
+        (rightLeft-bityouseix, rightTop+rightEye.shape[0]-int(bityouseiy/2), rightEye.shape[1], bityouseiy)
+    ]
 
-# save results
-cv2.imwrite("portrait_of_mussorgsky2_bump.jpg", result)
+    for area in blur_areas:
+        im = mosaic_area(im, *area, blur_num)
 
-# display images
-cv2.imshow('img', img)
-cv2.imshow('crop', crop)
-cv2.imshow('bump', bump)
-cv2.imshow('mask', mask)
-cv2.imshow('bumped', bumped)
-cv2.imshow('result', result)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+    return im
+
+def handler(event, context):
+    try:
+        base_64ed_image = event.get('myimg', 'none')
+        magnification = float(event.get('magni', 1.4))
+        blur_num = int(event.get('blur', 3))
+        im = base64_to_cv2(base_64ed_image)
+        processed_im = process_image(im, magnification, blur_num)
+        return {'status': 200, 'message': 'OK', 'img': cv2_to_base64(processed_im)}
+    except Exception as e:
+        return {'status': 500, 'message': str(e)}
+
+def display_image(image):
+    plt.figure(figsize=(10, 10))
+    plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    plt.axis('off')
+    plt.show()
+
+if __name__ == "__main__":
+    image_path = '640.jpg'
+    image = cv2.imread(image_path)
+    
+    if image is None:
+        print(f"Error: Could not read the image file: {image_path}")
+    else:
+        print("Original Image:")
+        display_image(image)
+        
+        base64_image = cv2_to_base64(image)
+        event = {'myimg': base64_image, 'magni': 1.4, 'blur': 3}
+        result = handler(event, None)
+        
+        if result['status'] == 200:
+            processed_image = base64_to_cv2(result['img'])
+            print("Processed Image:")
+            display_image(processed_image)
+        else:
+            print(f"Error: {result['message']}")
