@@ -104,4 +104,5 @@ elif page == "美容外科ランキング":
     stc.html('''
     <img src="/Users/kimurahotaka/Documents/Venus/takasu.jpg" alt="aiu"
             ''')
+    #commit間違えました"
     
